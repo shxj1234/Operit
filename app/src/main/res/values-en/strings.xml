@@ -3231,6 +3231,7 @@
     <string name="skillmgr_no_skills_found">No Skills found. Please place Skill folders in: %1$s, and ensure they contain SKILL.md.</string>
     <string name="skillmgr_cannot_read_file">Cannot read file</string>
     <string name="skillmgr_delete">Delete</string>
+    <string name="skill_builtin">Built-in</string>
     <string name="skillmgr_close">Close</string>
     <string name="skillmgr_direct_skill_id">Skill ID</string>
     <string name="skillmgr_direct_skill_id_hint">e.g. my_skill</string>

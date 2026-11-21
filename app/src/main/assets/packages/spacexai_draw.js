@@ -1,4 +1,3 @@
-"use strict";
 /* METADATA
 {
   "name": "spacexai_draw",

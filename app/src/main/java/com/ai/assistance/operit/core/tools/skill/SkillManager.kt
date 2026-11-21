@@ -14,6 +14,14 @@ class SkillManager private constructor(private val context: Context) {
     companion object {
         private const val TAG = "SkillManager"
 
+        // 内置 Skill：随 APK 打包的 zip，首次扫描时解压到应用私有目录后按现有机制使用。
+        // 资产不是文件系统上的真实文件，终端工具按路径读不到，所以必须解压一次，不能直接读 assets。
+        private const val BUILTIN_SKILL_ASSET = "skills/ningning-fusion-armor.zip"
+        private const val BUILTIN_SKILL_DIR_NAME = "ningning-fusion-armor"
+        // 内置 Skill 版本标记：换新版 zip 时同步改这个值，下次扫描会删旧目录重新解压。
+        private const val BUILTIN_SKILL_VERSION = "1"
+        private const val BUILTIN_SKILLS_DIR_NAME = "builtin_skills"
+
         @Volatile private var INSTANCE: SkillManager? = null
 
         fun getInstance(context: Context): SkillManager {
@@ -26,6 +34,7 @@ class SkillManager private constructor(private val context: Context) {
 
     private val availableSkills = mutableMapOf<String, SkillPackage>()
     private val skillLoadErrors = mutableMapOf<String, String>()
+    private val builtinExtractLock = Any()
 
     private fun getSkillsRootDir(): File {
         val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
@@ -41,9 +50,83 @@ class SkillManager private constructor(private val context: Context) {
         return getSkillsRootDir().absolutePath
     }
 
+    // 内置 Skill 解压目标：应用私有目录，不走 Download 公共目录，用户删不掉也改不了。
+    private fun getBuiltinSkillsRootDir(): File {
+        val builtinDir = File(context.filesDir, BUILTIN_SKILLS_DIR_NAME)
+        if (!builtinDir.exists()) {
+            builtinDir.mkdirs()
+        }
+        return builtinDir
+    }
+
+    // 确保内置 Skill 已解压：目录已存在且 SKILL.md 在、版本标记一致就跳过，否则重新解压。
+    // 解压失败只记一条加载错误，不抛出去——Download 目录的扫描照常进行。
+    private fun ensureBuiltinSkillExtracted() {
+        synchronized(builtinExtractLock) {
+            val builtinRoot = getBuiltinSkillsRootDir()
+            val skillDir = File(builtinRoot, BUILTIN_SKILL_DIR_NAME)
+            val versionFile = File(builtinRoot, ".${BUILTIN_SKILL_DIR_NAME}.version")
+            val installedVersion = try {
+                versionFile.takeIf { it.isFile }?.readText()?.trim()
+            } catch (_: Exception) {
+                null
+            }
+            val existingSkillFile = File(skillDir, "SKILL.md").let { primary ->
+                if (primary.exists()) primary else File(skillDir, "skill.md")
+            }
+            if (existingSkillFile.isFile && installedVersion == BUILTIN_SKILL_VERSION) {
+                return
+            }
+
+            // 先解到临时目录、校验通过后再替换旧目录：中途失败旧版本还在。
+            val tmpZip = File(context.cacheDir, "builtin_skill_${BUILTIN_SKILL_DIR_NAME}.zip")
+            val tmpDir = File(builtinRoot, ".${BUILTIN_SKILL_DIR_NAME}.tmp")
+            try {
+                tmpDir.deleteRecursively()
+                tmpDir.mkdirs()
+                context.assets.open(BUILTIN_SKILL_ASSET).use { input ->
+                    FileOutputStream(tmpZip).use { output -> input.copyTo(output) }
+                }
+                unzipToDirectory(tmpZip, tmpDir)
+                val extractedSkillDir = File(tmpDir, BUILTIN_SKILL_DIR_NAME)
+                val extractedSkillFile = File(extractedSkillDir, "SKILL.md").let { primary ->
+                    if (primary.exists()) primary else File(extractedSkillDir, "skill.md")
+                }
+                if (!extractedSkillFile.isFile) {
+                    throw IllegalStateException("Builtin skill zip has no SKILL.md: $BUILTIN_SKILL_ASSET")
+                }
+                skillDir.deleteRecursively()
+                if (!extractedSkillDir.renameTo(skillDir)) {
+                    throw IllegalStateException("Failed to install builtin skill: $BUILTIN_SKILL_DIR_NAME")
+                }
+                // 版本标记最后写：没写上说明这次解压没完成，下次扫描会重新解压。
+                versionFile.writeText(BUILTIN_SKILL_VERSION)
+            } catch (e: Exception) {
+                AppLogger.e(TAG, "Failed to extract builtin skill", e)
+                skillLoadErrors[BUILTIN_SKILL_DIR_NAME] = context.getString(
+                    R.string.skill_error_scan_failed,
+                    e.message ?: e.javaClass.simpleName
+                )
+            } finally {
+                try {
+                    tmpDir.deleteRecursively()
+                } catch (_: Exception) {
+                }
+                try {
+                    if (tmpZip.exists()) tmpZip.delete()
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
     fun refreshAvailableSkills() {
         availableSkills.clear()
         skillLoadErrors.clear()
+
+        ensureBuiltinSkillExtracted()
+        // 内置目录先扫：同名时 Download 目录的副本走现有的重名报错，内置优先。
+        scanSkillsDirectory(getBuiltinSkillsRootDir(), isBuiltIn = true)
 
         val skillsDir = try {
             getSkillsRootDir()
@@ -54,6 +137,10 @@ class SkillManager private constructor(private val context: Context) {
             return
         }
 
+        scanSkillsDirectory(skillsDir, isBuiltIn = false)
+    }
+
+    private fun scanSkillsDirectory(skillsDir: File, isBuiltIn: Boolean) {
         if (!skillsDir.exists() || !skillsDir.isDirectory) {
             return
         }
@@ -93,7 +180,8 @@ class SkillManager private constructor(private val context: Context) {
                     name = skillName,
                     description = skillDesc,
                     directory = child,
-                    skillFile = skillFile
+                    skillFile = skillFile,
+                    isBuiltIn = isBuiltIn
                 )
             } catch (e: Exception) {
                 AppLogger.e(TAG, "Error loading skill from ${skillFile.absolutePath}", e)
@@ -183,6 +271,10 @@ class SkillManager private constructor(private val context: Context) {
     fun deleteSkill(skillName: String): Boolean {
         refreshAvailableSkills()
         val skill = availableSkills[skillName] ?: return false
+        if (skill.isBuiltIn) {
+            AppLogger.w(TAG, "Refusing to delete builtin skill: $skillName")
+            return false
+        }
         return try {
             val ok = skill.directory.deleteRecursively()
             if (ok) {
@@ -371,6 +463,13 @@ class SkillManager private constructor(private val context: Context) {
             val finalDir = File(skillsRoot, baseName.trim().ifBlank { "skill" })
 
             if (finalDir.exists()) {
+                cleanupTmp()
+                return SkillImportResult(context.getString(R.string.skill_error_import_duplicate_name, finalDir.name), null)
+            }
+
+            // 同名检查也要覆盖内置 Skill：内置优先，手动导入同名时直接报重名，不静默覆盖任何一方。
+            refreshAvailableSkills()
+            if (availableSkills.containsKey(finalDir.name)) {
                 cleanupTmp()
                 return SkillImportResult(context.getString(R.string.skill_error_import_duplicate_name, finalDir.name), null)
             }

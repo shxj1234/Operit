@@ -174,6 +174,10 @@ class SkillRepository private constructor(private val context: Context) {
             if (finalDir.exists()) {
                 return@withContext context.getString(R.string.skill_error_import_duplicate_name, finalDir.name)
             }
+            // 同名检查也要覆盖内置 Skill：内置优先，手动创建同名时直接报重名。
+            if (skillManager.getAvailableSkills().containsKey(trimmedId)) {
+                return@withContext context.getString(R.string.skill_error_import_duplicate_name, trimmedId)
+            }
             if (!finalDir.mkdirs()) {
                 return@withContext context.getString(
                     R.string.skillmgr_direct_create_dir_failed,

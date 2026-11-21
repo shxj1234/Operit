@@ -36,6 +36,7 @@ import com.ai.assistance.operit.widget.ToolPkgDesktopWidgetHost
 import com.ai.assistance.operit.util.OperitPaths
 import com.ai.assistance.operit.util.ToolPkgWasmRuntime
 import java.io.File
+import java.io.IOException
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CompletableFuture
@@ -1301,7 +1302,15 @@ private constructor(private val context: Context, private val aiToolHandler: AIT
     }
 
     private fun scanAssetPackages(): PackageScanSnapshot {
-        val packageFiles = context.assets.list(ASSETS_PACKAGES_DIR) ?: emptyArray()
+        // AssetManager.list() 在目录缺失时抛 FileNotFoundException 而非返回 null，
+        // 旧代码的 ?: emptyArray() 防不住，会导致 PackageManager 初始化失败、应用启动崩溃；
+        // 读不到内置包目录时按无内置包处理（外部包扫描不受影响），并记一条错误日志。
+        val packageFiles = try {
+            context.assets.list(ASSETS_PACKAGES_DIR) ?: emptyArray()
+        } catch (e: IOException) {
+            logToolPkgError("内置包目录不可读，跳过内置包扫描: $ASSETS_PACKAGES_DIR", e)
+            emptyArray()
+        }
         val candidates =
             packageFiles.map { fileName ->
                 val assetPath = "$ASSETS_PACKAGES_DIR/$fileName"

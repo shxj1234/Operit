@@ -61,8 +61,6 @@ kls_database.db
 operit-pc-agent.zip
 .uv-caches
 
-# generated toolpkg bundles
-*.toolpkg
 .venv
 
 # Python bytecode caches

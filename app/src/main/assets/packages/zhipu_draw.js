@@ -1,4 +1,3 @@
-"use strict";
 /* METADATA
 {
   "name": "zhipu_draw",

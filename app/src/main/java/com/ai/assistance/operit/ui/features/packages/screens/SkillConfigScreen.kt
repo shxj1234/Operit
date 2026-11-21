@@ -993,8 +993,11 @@ private fun SkillDetailDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onDelete) {
-                Text(text = stringResource(R.string.skillmgr_delete))
+            // 内置 Skill 不可删除，不显示删除按钮。
+            if (!skill.isBuiltIn) {
+                TextButton(onClick = onDelete) {
+                    Text(text = stringResource(R.string.skillmgr_delete))
+                }
             }
         },
         dismissButton = {
@@ -1108,13 +1111,30 @@ private fun SkillListItem(
             Spacer(modifier = Modifier.width(12.dp))
 
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = skill.name,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = skill.name,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (skill.isBuiltIn) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Surface(
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = stringResource(R.string.skill_builtin),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                            )
+                        }
+                    }
+                }
                 if (skill.description.isNotBlank()) {
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(

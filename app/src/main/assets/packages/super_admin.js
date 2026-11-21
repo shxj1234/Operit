@@ -41,7 +41,7 @@ METADATA
             "parameters": [
                 {
                     "name": "sessionId",
-                    "description": { "zh": "可选目标会话ID。不传则使用当前工具会话的默认终端；子代理按每次任务隔离，无工具会话上下文时为 super_admin_default_session。", "en": "Optional target session ID. If omitted, uses the current tool session's default terminal; subagent runs are isolated, and calls without a tool-session context use super_admin_default_session." },
+                    "description": { "zh": "可选目标会话ID。不传则使用当前对话的默认会话；无 chatId 时为 super_admin_default_session。", "en": "Optional target session ID. If omitted, uses the current chat's default session; without chatId it is super_admin_default_session." },
                     "type": "string",
                     "required": false
                 },
@@ -59,7 +59,7 @@ METADATA
             "parameters": [
                 {
                     "name": "sessionId",
-                    "description": { "zh": "可选目标会话ID。不传则使用当前工具会话的默认终端；子代理按每次任务隔离，无工具会话上下文时为 super_admin_default_session。", "en": "Optional target session ID. If omitted, uses the current tool session's default terminal; subagent runs are isolated, and calls without a tool-session context use super_admin_default_session." },
+                    "description": { "zh": "可选目标会话ID。不传则使用当前对话的默认会话；无 chatId 时为 super_admin_default_session。", "en": "Optional target session ID. If omitted, uses the current chat's default session; without chatId it is super_admin_default_session." },
                     "type": "string",
                     "required": false
                 }
@@ -71,7 +71,7 @@ METADATA
             "parameters": [
                 {
                     "name": "sessionId",
-                    "description": { "zh": "可选目标会话ID。不传则使用当前工具会话的默认终端；子代理按每次任务隔离，无工具会话上下文时为 super_admin_default_session。", "en": "Optional target session ID. If omitted, uses the current tool session's default terminal; subagent runs are isolated, and calls without a tool-session context use super_admin_default_session." },
+                    "description": { "zh": "可选目标会话ID。不传则使用当前对话的默认会话；无 chatId 时为 super_admin_default_session。", "en": "Optional target session ID. If omitted, uses the current chat's default session; without chatId it is super_admin_default_session." },
                     "type": "string",
                     "required": false
                 },
@@ -111,15 +111,15 @@ const superAdmin = (function () {
     const DEFAULT_TERMINAL_SESSION_NAME = "super_admin_default_session";
     const BACKGROUND_TERMINAL_SESSION_PREFIX = "super_admin_background";
     function getCurrentChatSessionSuffix() {
-        const toolSessionId = getToolSessionId();
-        if (toolSessionId === undefined) {
+        const chatId = getChatId();
+        if (chatId === undefined) {
             return "";
         }
-        const normalizedToolSessionId = toolSessionId.trim();
-        if (!normalizedToolSessionId) {
+        const normalizedChatId = chatId.trim();
+        if (!normalizedChatId) {
             return "";
         }
-        return normalizedToolSessionId.replace(/[^a-zA-Z0-9._-]+/g, "_");
+        return normalizedChatId.replace(/[^a-zA-Z0-9._-]+/g, "_");
     }
     function getDefaultTerminalSessionName() {
         const chatSuffix = getCurrentChatSessionSuffix();
@@ -134,33 +134,10 @@ const superAdmin = (function () {
             : BACKGROUND_TERMINAL_SESSION_PREFIX;
         return `${prefix}_${Date.now()}`;
     }
-    function isTerminalExecutionFailure(error) {
-        if (typeof error !== "object" || error === null ||
-            !("message" in error) || typeof error.message !== "string" || !("data" in error))
-            return false;
-        const data = error.data;
-        if (typeof data !== "object" || data === null)
-            return false;
-        return "command" in data && typeof data.command === "string" &&
-            "output" in data && typeof data.output === "string" &&
-            "sessionId" in data && typeof data.sessionId === "string" &&
-            "exitCode" in data && typeof data.exitCode === "number" &&
-            "sessionAlive" in data && typeof data.sessionAlive === "boolean";
-    }
-    async function executeTerminalWithDetails(sessionId, command, timeout) {
-        try {
-            return { result: await Tools.System.terminal.exec(sessionId, command, timeout), failureMessage: null };
-        }
-        catch (error) {
-            console.error("[terminal/execute]", error);
-            // A failed command already ran. Preserve its typed evidence without executing it again.
-            if (!isTerminalExecutionFailure(error))
-                throw error;
-            return { result: error.data, failureMessage: error.message };
-        }
-    }
     async function persistTerminalOutputIfTooLong(command, result) {
-        const outputStr = result.output;
+        const outputStr = typeof result?.output === "string"
+            ? result.output
+            : String(result?.output ?? "");
         if (outputStr.length <= MAX_INLINE_TERMINAL_OUTPUT_CHARS) {
             return null;
         }
@@ -172,11 +149,10 @@ const superAdmin = (function () {
         return {
             command,
             output: "(saved_to_file)",
-            exitCode: result.exitCode,
-            sessionId: result.sessionId,
-            timedOut: result.timedOut === true,
-            sessionAlive: result.sessionAlive,
-            context_preserved: result.sessionAlive,
+            exitCode: result?.exitCode,
+            sessionId: result?.sessionId,
+            timedOut: result?.timedOut === true,
+            context_preserved: result?.timedOut !== true,
             output_saved_to: filePath,
             output_chars: outputStr.length,
             operit_clean_on_exit_dir: OPERIT_CLEAN_ON_EXIT_DIR,
@@ -238,32 +214,22 @@ const superAdmin = (function () {
             const session = await Tools.System.terminal.create(getDefaultTerminalSessionName());
             const sessionId = session.sessionId;
             // 调用系统工具执行终端命令
-            const execution = await executeTerminalWithDetails(sessionId, command, timeout);
-            const result = execution.result;
+            const result = await Tools.System.terminal.exec(sessionId, command, timeout);
             const timedOut = result.timedOut === true;
             const persistedResult = await persistTerminalOutputIfTooLong(command, result);
-            const terminalResult = persistedResult === null
-                ? {
-                    command: command,
-                    output: result.output,
-                    exitCode: result.exitCode,
-                    sessionId: result.sessionId,
-                    timedOut: timedOut,
-                    timeoutMsUsed: timeout,
-                    sessionAlive: result.sessionAlive,
-                    context_preserved: result.sessionAlive
-                }
-                : { ...persistedResult, timeoutMsUsed: timeout };
-            // The SDK returns timeout details for compatibility; the model-facing tool must
-            // still fail, including the output or its persisted-file reference in data.
-            if (timedOut || execution.failureMessage !== null) {
-                return {
-                    success: false,
-                    message: timedOut ? `Command timed out after ${timeout}ms` : execution.failureMessage,
-                    data: terminalResult
-                };
+            if (persistedResult) {
+                persistedResult.timeoutMsUsed = timeout;
+                return persistedResult;
             }
-            return terminalResult;
+            return {
+                command: command,
+                output: result.output,
+                exitCode: result.exitCode,
+                sessionId: result.sessionId,
+                timedOut: timedOut,
+                timeoutMsUsed: timeout,
+                context_preserved: !timedOut
+            };
         }
         catch (error) {
             console.error(`[terminal] 错误: ${error.message}`);
@@ -277,7 +243,7 @@ const superAdmin = (function () {
     /**
      * 等待同一终端会话中的上一条命令执行完成
      * 原理：向同会话追加一个内部 marker 命令。由于会话按序执行，marker 开始执行即代表前序命令已完成。
-     * @param sessionId - 可选会话ID；不传时使用当前工具会话的默认会话，无工具会话上下文时为 super_admin_default_session
+     * @param sessionId - 可选会话ID；不传时使用当前对话的默认会话，无 chatId 时为 super_admin_default_session
      * @param timeoutMs - 可选超时（毫秒，最低 3000ms）；未传默认 300000ms
      */
     async function terminal_wait(params = {}) {
@@ -298,35 +264,23 @@ const superAdmin = (function () {
             const marker = `__OPERIT_TERMINAL_WAIT_DONE_${Date.now()}_${Math.floor(Math.random() * 1000000)}__`;
             const waitCommand = `printf '${marker}\\n'`;
             const startedAt = Date.now();
-            const execution = await executeTerminalWithDetails(sessionId, waitCommand, timeout);
-            const result = execution.result;
+            const result = await Tools.System.terminal.exec(sessionId, waitCommand, timeout);
             const elapsedMs = Date.now() - startedAt;
-            const timedOut = result.timedOut === true;
-            const outputStr = result.output;
+            const timedOut = result?.timedOut === true;
+            const outputStr = typeof result?.output === "string"
+                ? result.output
+                : String(result?.output ?? "");
             const markerSeen = outputStr.includes(marker);
-            const waitResult = {
+            return {
                 sessionId,
                 timedOut,
                 timeoutMsUsed: timeout,
                 elapsedMs,
-                waitCompleted: execution.failureMessage === null && !timedOut && markerSeen,
+                waitCompleted: !timedOut && markerSeen,
                 markerSeen,
-                exitCode: result.exitCode,
-                sessionAlive: result.sessionAlive,
-                context_preserved: result.sessionAlive
+                exitCode: result?.exitCode,
+                context_preserved: !timedOut
             };
-            // A missing completion marker is not a successful wait. Keep the execution
-            // details with the failure, so the caller can inspect the same session.
-            if (execution.failureMessage !== null || timedOut || !markerSeen) {
-                return {
-                    success: false,
-                    message: execution.failureMessage !== null ? execution.failureMessage : timedOut
-                        ? `Terminal wait timed out after ${timeout}ms`
-                        : "Terminal wait completed without observing the completion marker",
-                    data: { ...waitResult, output: outputStr }
-                };
-            }
-            return waitResult;
         }
         catch (error) {
             console.error(`[terminal_wait] 错误: ${error.message}`);
@@ -362,7 +316,7 @@ const superAdmin = (function () {
     }
     /**
      * 获取目标终端会话可见屏幕内容（仅一屏，不包含历史）
-     * @param sessionId - 可选会话ID；不传时使用当前工具会话的默认会话，无工具会话上下文时为 super_admin_default_session
+     * @param sessionId - 可选会话ID；不传时使用当前对话的默认会话，无 chatId 时为 super_admin_default_session
      */
     async function terminal_getscreen(params = {}) {
         try {
@@ -386,7 +340,7 @@ const superAdmin = (function () {
     }
     /**
      * 向目标终端会话写入输入
-     * @param sessionId - 可选会话ID；不传时使用当前工具会话的默认会话，无工具会话上下文时为 super_admin_default_session
+     * @param sessionId - 可选会话ID；不传时使用当前对话的默认会话，无 chatId 时为 super_admin_default_session
      * @param input - 文本输入
      * @param control - 控制键
      */

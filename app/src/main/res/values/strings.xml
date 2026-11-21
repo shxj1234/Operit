@@ -6818,6 +6818,7 @@
     <string name="skillmgr_no_skills_found">未找到任何Skill。请将Skill文件夹放入: %1$s，并确保其中包含 SKILL.md。</string>
     <string name="skillmgr_cannot_read_file">无法读取文件</string>
     <string name="skillmgr_delete">删除</string>
+    <string name="skill_builtin">内置</string>
     <string name="skillmgr_close">关闭</string>
     <string name="skillmgr_direct_skill_id">Skill ID</string>
     <string name="skillmgr_direct_skill_id_hint">例如: my_skill</string>

@@ -1,4 +1,3 @@
-"use strict";
 /* METADATA
 {
   "name": "siliconflow_draw",

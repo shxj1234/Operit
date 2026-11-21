@@ -45,7 +45,7 @@ import java.util.Locale
 private val Context.characterCardDataStore by
     versionedPreferencesDataStore(
         name = "character_cards",
-        currentVersion = 1,
+        currentVersion = 2,
     ) { appContext ->
         CharacterCardSchemaMigration(appContext)
     }
@@ -64,6 +64,7 @@ private class CharacterCardSchemaMigration(
         when (version) {
             0 -> versionZeroResult =
                 CharacterCardManager.migratePreferencesFromVersionZero(context, preferences)
+            1 -> CharacterCardManager.migratePreferencesFromVersionOne(context, preferences)
             else -> missingPreferencesSchemaMigration(version)
         }
     }
@@ -96,6 +97,11 @@ class CharacterCardManager private constructor(private val context: Context) {
         const val DEFAULT_CHARACTER_CARD_ID = "default_character"
 
         const val DEFAULT_CHARACTER_NAME = "Operit"
+
+        // 内置角色卡：宁宁（种子数据见 assets/character_cards/ningning.json）
+        const val NINGNING_CHARACTER_CARD_ID = "builtin_ningning"
+
+        private const val NINGNING_CHARACTER_CARD_ASSET = "character_cards/ningning.json"
         
         @Volatile
         private var INSTANCE: CharacterCardManager? = null
@@ -203,6 +209,226 @@ class CharacterCardManager private constructor(private val context: Context) {
             preferences[isDefaultKey] = true
             preferences[createdAtKey] = System.currentTimeMillis()
             preferences[updatedAtKey] = System.currentTimeMillis()
+        }
+
+        /**
+         * 从版本 1 迁移：种子内置角色卡“宁宁”。
+         * 只在升级/首次安装时跑一次：已存在同 ID 或同名角色卡时跳过，用户删除后不会复活。
+         * 世界书按导入酒馆卡的现有机制处理：条目拼成一个 FUNCTION 标签附着到角色卡上。
+         */
+        internal suspend fun migratePreferencesFromVersionOne(
+            context: Context,
+            preferences: MutablePreferences,
+        ) {
+            val currentList = preferences[CHARACTER_CARD_LIST]?.toMutableSet()
+                ?: mutableSetOf(DEFAULT_CHARACTER_CARD_ID)
+            if (currentList.contains(NINGNING_CHARACTER_CARD_ID)) {
+                return
+            }
+
+            val tavernCard = loadBuiltinTavernCard(context)
+            val existingNames = currentList.mapNotNull { cardId ->
+                preferences[stringPreferencesKey("character_card_${cardId}_name")]
+            }
+            if (tavernCard.data.name in existingNames) {
+                return
+            }
+
+            var worldBookTagId: String? = null
+            tavernCard.data.character_book?.let { book ->
+                if (book.entries.isNotEmpty()) {
+                    val worldBookContent = buildString {
+                        book.entries.forEach { entry ->
+                            if (entry.content.isNotBlank()) {
+                                append("[${entry.name}]\n${entry.content}\n\n")
+                            }
+                        }
+                    }.trim()
+
+                    if (worldBookContent.isNotBlank()) {
+                        worldBookTagId = PromptTagManager.getInstance(context)
+                            .createOrReusePromptTag(
+                                name = CharacterCardBilingualData.getWorldBookTagName(
+                                    context,
+                                    tavernCard.data.name
+                                ),
+                                description = CharacterCardBilingualData.getWorldBookTagDescription(
+                                    context,
+                                    tavernCard.data.name
+                                ),
+                                promptContent = worldBookContent,
+                                tagType = TagType.FUNCTION
+                            )
+                    }
+                }
+            }
+
+            val characterCard = convertTavernCardToCharacterCard(context, tavernCard)
+                .copy(
+                    id = NINGNING_CHARACTER_CARD_ID,
+                    attachedTagIds = worldBookTagId?.let { listOf(it) } ?: emptyList(),
+                    isDefault = false,
+                )
+            writeCharacterCardToPreferences(preferences, characterCard)
+            currentList.add(NINGNING_CHARACTER_CARD_ID)
+            preferences[CHARACTER_CARD_LIST] = currentList
+        }
+
+        private fun loadBuiltinTavernCard(context: Context): TavernCharacterCard {
+            val jsonString = context.assets.open(NINGNING_CHARACTER_CARD_ASSET)
+                .bufferedReader(Charsets.UTF_8).use { it.readText() }
+            return Gson().fromJson(jsonString, TavernCharacterCard::class.java)
+        }
+
+        private fun writeCharacterCardToPreferences(
+            preferences: MutablePreferences,
+            card: CharacterCard,
+        ) {
+            val id = card.id
+            preferences[stringPreferencesKey("character_card_${id}_name")] = card.name
+            preferences[stringPreferencesKey("character_card_${id}_description")] = card.description
+            preferences[stringPreferencesKey("character_card_${id}_character_setting")] = card.characterSetting
+            preferences[stringPreferencesKey("character_card_${id}_opening_statement")] = card.openingStatement
+            preferences[stringPreferencesKey("character_card_${id}_other_content_chat")] = card.otherContentChat
+            preferences[stringPreferencesKey("character_card_${id}_other_content_voice")] = card.otherContentVoice
+            preferences[stringSetPreferencesKey("character_card_${id}_attached_tag_ids")] = card.attachedTagIds.toSet()
+            preferences[stringPreferencesKey("character_card_${id}_advanced_custom_prompt")] = card.advancedCustomPrompt
+            preferences[stringPreferencesKey("character_card_${id}_marks")] = card.marks
+            preferences[stringPreferencesKey("character_card_${id}_chat_model_binding_mode")] =
+                CharacterCardChatModelBindingMode.normalize(card.chatModelBindingMode)
+            val chatModelConfigIdKey = stringPreferencesKey("character_card_${id}_chat_model_config_id")
+            if (card.chatModelConfigId.isNullOrBlank()) {
+                preferences.remove(chatModelConfigIdKey)
+            } else {
+                preferences[chatModelConfigIdKey] = card.chatModelConfigId
+            }
+            preferences[intPreferencesKey("character_card_${id}_chat_model_index")] = card.chatModelIndex.coerceAtLeast(0)
+            preferences[stringPreferencesKey("character_card_${id}_memory_profile_binding_mode")] =
+                CharacterCardMemoryProfileBindingMode.normalize(card.memoryProfileBindingMode)
+            val memoryProfileIdKey = stringPreferencesKey("character_card_${id}_memory_profile_id")
+            if (card.memoryProfileId.isNullOrBlank()) {
+                preferences.remove(memoryProfileIdKey)
+            } else {
+                preferences[memoryProfileIdKey] = card.memoryProfileId
+            }
+            // 酒馆卡通用转换不带工具白名单，种子卡的工具配置即默认值，这里直接清理残留键，
+            // 与 writeToolAccessConfig 对默认配置的处理一致。
+            preferences.remove(stringPreferencesKey("character_card_${id}_tool_access_config_json"))
+            preferences[booleanPreferencesKey("character_card_${id}_is_default")] = card.isDefault
+            preferences[longPreferencesKey("character_card_${id}_created_at")] = card.createdAt
+            preferences[longPreferencesKey("character_card_${id}_updated_at")] = card.updatedAt
+        }
+
+        /**
+         * 将酒馆角色卡转换为本地角色卡格式
+         */
+        private fun convertTavernCardToCharacterCard(
+            context: Context,
+            tavernCard: TavernCharacterCard,
+        ): CharacterCard {
+            val data = tavernCard.data
+
+            // 组合角色设定
+            val characterSetting = buildString {
+                if (data.description.isNotBlank()) {
+                    append(CharacterCardBilingualData.getCharacterDescriptionLabel(context))
+                    append("\n${data.description}\n\n")
+                }
+                if (data.personality.isNotBlank()) {
+                    append(CharacterCardBilingualData.getPersonalityLabel(context))
+                    append("\n${data.personality}\n\n")
+                }
+                if (data.scenario.isNotBlank()) {
+                    append(CharacterCardBilingualData.getScenarioLabel(context))
+                    append("\n${data.scenario}\n\n")
+                }
+            }.trim()
+
+            // 组合其他内容
+            val otherContentChat = buildString {
+                if (data.mes_example.isNotBlank()) {
+                    append(CharacterCardBilingualData.getDialogueExampleLabel(context))
+                    append("\n${data.mes_example}\n\n")
+                }
+                if (data.system_prompt.isNotBlank()) {
+                    append(CharacterCardBilingualData.getSystemPromptLabel(context))
+                    append("\n${data.system_prompt}\n\n")
+                }
+                if (data.post_history_instructions.isNotBlank()) {
+                    append(CharacterCardBilingualData.getPostHistoryInstructionsLabel(context))
+                    append("\n${data.post_history_instructions}\n\n")
+                }
+
+                // 添加备用问候语
+                if (data.alternate_greetings.isNotEmpty()) {
+                    append(CharacterCardBilingualData.getAlternateGreetingsLabel(context))
+                    data.alternate_greetings.forEachIndexed { index, greeting ->
+                        append("${index + 1}. $greeting\n")
+                    }
+                    append("\n")
+                }
+            }.trim()
+
+            // 组合高级自定义提示词
+            val advancedCustomPrompt = buildString {
+                data.extensions?.depth_prompt?.let { depthPrompt ->
+                    if (depthPrompt.prompt.isNotBlank()) {
+                        append(CharacterCardBilingualData.getDepthPromptLabel(context))
+                        append("\n${depthPrompt.prompt}\n\n")
+                    }
+                }
+            }.trim()
+
+            // 生成描述（简化版，不包含作者信息）
+            val description = if (data.tags.isNotEmpty()) {
+                CharacterCardBilingualData.getTagsLabel(context) + data.tags.take(5).joinToString(", ") +
+                if (data.tags.size > 5) CharacterCardBilingualData.getEtAlLabel(context) + "${data.tags.size}" else ""
+            } else ""
+
+            // 生成备注信息
+            val marks = buildString {
+                append(CharacterCardBilingualData.getSourceLabel(context))
+                if (data.creator.isNotBlank()) {
+                    append(CharacterCardBilingualData.getAuthorLabel(context))
+                    append("${data.creator}\n")
+                }
+                if (data.creator_notes.isNotBlank()) {
+                    append(CharacterCardBilingualData.getAuthorNotesLabel(context))
+                    append("${data.creator_notes}\n\n")
+                }
+                if (data.character_version.isNotBlank()) {
+                    append(CharacterCardBilingualData.getVersionLabel(context))
+                    append("${data.character_version}\n")
+                }
+                if (data.tags.isNotEmpty()) {
+                    append(CharacterCardBilingualData.getOriginalTagsLabel(context))
+                    append("${data.tags.joinToString(", ")}\n")
+                }
+                if (tavernCard.spec.isNotBlank()) {
+                    append(CharacterCardBilingualData.getFormatLabel(context))
+                    append("${tavernCard.spec}")
+                    if (tavernCard.spec_version.isNotBlank()) {
+                        append(" v${tavernCard.spec_version}")
+                    }
+                    append("\n")
+                }
+            }.trim()
+
+            return CharacterCard(
+                id = "", // 将在createCharacterCard中生成
+                name = data.name,
+                description = description,
+                characterSetting = characterSetting,
+                openingStatement = data.first_mes, // 从first_mes获取开场白
+                otherContentChat = otherContentChat,
+                otherContentVoice = "",
+                attachedTagIds = emptyList(), // 可以后续根据tags创建标签
+                advancedCustomPrompt = advancedCustomPrompt,
+                marks = marks,
+                isDefault = false,
+                createdAt = System.currentTimeMillis(),
+                updatedAt = System.currentTimeMillis()
+            )
         }
 
         private fun removeDeletedTagReferences(
@@ -1046,7 +1272,7 @@ class CharacterCardManager private constructor(private val context: Context) {
                     updatedAt = System.currentTimeMillis()
                 )
             } else {
-                convertTavernCardToCharacterCard(tavernCard)
+                convertTavernCardToCharacterCard(context, tavernCard)
             }
 
             val finalCard = worldBookTagId?.let {
@@ -1300,117 +1526,6 @@ class CharacterCardManager private constructor(private val context: Context) {
         return remapped.distinct()
     }
     
-    /**
-     * 将酒馆角色卡转换为本地角色卡格式
-     */
-    private suspend fun convertTavernCardToCharacterCard(tavernCard: TavernCharacterCard): CharacterCard {
-        val data = tavernCard.data
-        
-        // 组合角色设定
-        val characterSetting = buildString {
-            if (data.description.isNotBlank()) {
-                append(CharacterCardBilingualData.getCharacterDescriptionLabel(context))
-                append("\n${data.description}\n\n")
-            }
-            if (data.personality.isNotBlank()) {
-                append(CharacterCardBilingualData.getPersonalityLabel(context))
-                append("\n${data.personality}\n\n")
-            }
-            if (data.scenario.isNotBlank()) {
-                append(CharacterCardBilingualData.getScenarioLabel(context))
-                append("\n${data.scenario}\n\n")
-            }
-        }.trim()
-
-        // 组合其他内容
-        val otherContentChat = buildString {
-            if (data.mes_example.isNotBlank()) {
-                append(CharacterCardBilingualData.getDialogueExampleLabel(context))
-                append("\n${data.mes_example}\n\n")
-            }
-            if (data.system_prompt.isNotBlank()) {
-                append(CharacterCardBilingualData.getSystemPromptLabel(context))
-                append("\n${data.system_prompt}\n\n")
-            }
-            if (data.post_history_instructions.isNotBlank()) {
-                append(CharacterCardBilingualData.getPostHistoryInstructionsLabel(context))
-                append("\n${data.post_history_instructions}\n\n")
-            }
-
-            // 添加备用问候语
-            if (data.alternate_greetings.isNotEmpty()) {
-                append(CharacterCardBilingualData.getAlternateGreetingsLabel(context))
-                data.alternate_greetings.forEachIndexed { index, greeting ->
-                    append("${index + 1}. $greeting\n")
-                }
-                append("\n")
-            }
-        }.trim()
-
-        // 组合高级自定义提示词
-        val advancedCustomPrompt = buildString {
-
-
-            data.extensions?.depth_prompt?.let { depthPrompt ->
-                if (depthPrompt.prompt.isNotBlank()) {
-                    append(CharacterCardBilingualData.getDepthPromptLabel(context))
-                    append("\n${depthPrompt.prompt}\n\n")
-                }
-            }
-        }.trim()
-
-        // 生成描述（简化版，不包含作者信息）
-        val description = if (data.tags.isNotEmpty()) {
-            CharacterCardBilingualData.getTagsLabel(context) + data.tags.take(5).joinToString(", ") +
-            if (data.tags.size > 5) CharacterCardBilingualData.getEtAlLabel(context) + "${data.tags.size}" else ""
-        } else ""
-
-        // 生成备注信息
-        val marks = buildString {
-            append(CharacterCardBilingualData.getSourceLabel(context))
-            if (data.creator.isNotBlank()) {
-                append(CharacterCardBilingualData.getAuthorLabel(context))
-                append("${data.creator}\n")
-            }
-            if (data.creator_notes.isNotBlank()) {
-                append(CharacterCardBilingualData.getAuthorNotesLabel(context))
-                append("${data.creator_notes}\n\n")
-            }
-            if (data.character_version.isNotBlank()) {
-                append(CharacterCardBilingualData.getVersionLabel(context))
-                append("${data.character_version}\n")
-            }
-            if (data.tags.isNotEmpty()) {
-                append(CharacterCardBilingualData.getOriginalTagsLabel(context))
-                append("${data.tags.joinToString(", ")}\n")
-            }
-            if (tavernCard.spec.isNotBlank()) {
-                append(CharacterCardBilingualData.getFormatLabel(context))
-                append("${tavernCard.spec}")
-                if (tavernCard.spec_version.isNotBlank()) {
-                    append(" v${tavernCard.spec_version}")
-                }
-                append("\n")
-            }
-        }.trim()
-        
-        return CharacterCard(
-            id = "", // 将在createCharacterCard中生成
-            name = data.name,
-            description = description,
-            characterSetting = characterSetting,
-            openingStatement = data.first_mes, // 从first_mes获取开场白
-            otherContentChat = otherContentChat,
-            otherContentVoice = "",
-            attachedTagIds = emptyList(), // 可以后续根据tags创建标签
-            advancedCustomPrompt = advancedCustomPrompt,
-            marks = marks,
-            isDefault = false,
-            createdAt = System.currentTimeMillis(),
-            updatedAt = System.currentTimeMillis()
-        )
-    }
-
     /**
      * 切换到指定角色卡的Waifu模式配置
      */

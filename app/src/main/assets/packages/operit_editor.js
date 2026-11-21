@@ -34,11 +34,12 @@
 - 运行状态缓存：server_status.json（非实时快照，仅用于状态记录与工具缓存，不作为排查判定依据）
 2) 两侧路径要严格区分：
 - Android 侧是源目录（用户导入/存放目录），不是最终运行目录
-- 默认 Linux 运行目录：~/mcp_plugins/<pluginId最后一段>
-- 在 mcpServers.<id> 中写了 cwd 时，以该 cwd 为运行目录；MCP 真正启动时执行目录与命令都按它解析
+- Linux 侧是最终运行目录：~/mcp_plugins/<pluginId最后一段>
+- MCP 真正启动时，执行目录与命令都以 Linux 侧为准
 3) 本地部署实际行为（代码逻辑）：
-- 仅当配置依赖应用托管目录（相对 command、相对入口、且没有 cwd）时：创建目标目录、把 Android 侧插件目录复制到 Linux 侧目录、执行自动分析出的安装/构建命令（会跳过启动命令）
-- 自包含配置不复制、不部署：command 是绝对路径、第一个非选项 args 是绝对路径，或显式写了 cwd，都视为文件已在 Linux 侧就绪
+- 创建目标目录
+- 将 Android 侧插件目录复制到 Linux 侧目录
+- 执行自动分析出的安装/构建命令（会跳过启动命令）
 3.1) 本地插件识别规则：
 - 这样识别是为兼容存储位置外层套目录的情况（如 `<pluginId>/<repo>-main/...`）；Android 侧目录内至少要命中一个标志文件：`README.md`、`package.json`、`mcp.config.json`、`main.js`、`main.py`、`index.js`、`index.py`，否则可能被判定为未安装，进不了启动列表。
 4) 命令型插件判定：
@@ -48,16 +49,18 @@
 - 因此这类 MCP 的实际运行依赖是 `pnpm`；Linux 终端里必须装有 `pnpm`，不能只装 `npm`。
 - 不要把 command 改成 `npm`；当前已知这样可能触发 `double free` 报错。现阶段约定是：配置时按 `npx` 填，运行时由软件内部转成 `pnpm dlx`。
 5) 系统启动行为（必须理解）：
-- 本地插件：系统会读取 mcp_config.json 中该插件的 command/args/env/cwd；cwd 有值就用 cwd，否则用 ~/mcp_plugins/<shortName>；可用性以“工具可调用/服务可响应”为准
+- 本地插件：系统会读取 mcp_config.json 中该插件的 command/args/env，使用 cwd=~/mcp_plugins/<shortName> 启动进程；可用性以“工具可调用/服务可响应”为准
 - 远程插件：系统按 endpoint + connectionType（可选 bearerToken/headers）发起连接并校验连通
 6) command 的实际执行位置（必须按此理解）：
-- 本地插件启动时，系统在 Linux 终端环境中启动进程；默认工作目录是 ~/mcp_plugins/<shortName>，配置了 cwd 时使用 cwd
+- 本地插件启动时，系统在 Linux 终端环境中启动进程；执行工作目录固定是 ~/mcp_plugins/<shortName>
 - mcp_config.json 里填写的 command 就是在这个 Linux 工作目录上下文中被执行，不会在 Android 源目录执行
-- args 里的相对路径，统一按该 cwd 解析；绝对路径按 Linux 路径使用
+- args 里的相对路径，统一按该 cwd 解析
 6.1) node 命令示例（按插件ID）：
-- 方式一（应用托管）：pluginId=owner/my-plugin，省略 cwd → ~/mcp_plugins/my-plugin；入口在 ~/mcp_plugins/my-plugin/dist/index.js 时写 "command": "node"、"args": ["dist/index.js"]
-- 方式二（自己维护目录）：写 "cwd": "/root/moonlight-garden-handytools"（或 ~/...），args 可用相对入口如 "dist/index.js"；也可直接写绝对入口 "args": ["/root/.../dist/index.js"]
-- 两种方式都不要写 /sdcard/... 的 Android 路径
+- 例：pluginId=owner/my-plugin，则 shortName=my-plugin，cwd=~/mcp_plugins/my-plugin
+- 如果入口文件在 ~/mcp_plugins/my-plugin/dist/index.js，则写：
+  "command": "node"
+  "args": ["dist/index.js"]
+- 这里 args 必须按 cwd 写相对路径，不要写 /sdcard/... 的 Android 路径
 7) mcp_config.json 字段规范：
 - 顶层必须有 mcpServers（对象）
 - mcpServers 的 key 是 serverId（通常与插件ID一致，避免随意改名）
@@ -66,27 +69,24 @@
   - command（必填，启动命令）
   - args（可选，字符串数组）
   - env（可选，键值对）
-  - cwd（可选，Linux 工作目录；标准 MCP stdio 字段）
   - autoApprove（可选，数组）
   - disabled（可选，true=禁用）
 - MCP 的环境变量必须写在 mcpServers.<id>.env；`read_environment_variable` / `write_environment_variable` 不会读写这里。
 8) mcp_config.json 路径写法规则：
 - 不要把 Android 绝对路径写进本地插件启动参数（例如 /sdcard/...）
-- 使用应用托管目录时，command/args 按 Linux 运行目录写相对路径（因为 cwd 是 ~/mcp_plugins/<shortName>）
-- 自维护目录时显式写 cwd（Linux 路径），或让 command/入口 args 使用 Linux 绝对路径
+- 本地插件命令应按 Linux 运行目录编写，优先相对路径（因为 cwd 已固定到 ~/mcp_plugins/<shortName>）
 - 如果必须写绝对路径，也应是 Linux 侧路径，不应写 Android 侧路径
 9) 启用开关：
 - 本地插件使用 mcpServers.<id>.disabled
 - 远程插件使用 pluginMetadata.<id>.disabled
 10) MCP 排查顺序（按顺序执行）：
 - 检查开关是否启用
-- 检查 mcp_config.json 的 command/args/env/cwd 字段是否完整
-- 使用应用托管目录时检查 ~/mcp_plugins/<id> 是否存在且非空；使用自维护目录时检查 cwd 是否存在
-- 检查 command 是否能在终端中直接执行（绝对路径命令需真实存在）
+- 检查本地部署目录是否存在且非空
+- 检查 mcp_config.json 的 command/args/env 字段是否完整
 - 检查 args 是否误写 Android 路径
-- 检查 env 中所需 key/token（失败原因会显示在管理页插件行；日志只记录键名，不记录值）
+- 检查 env 中所需 key/token
 - 不要把 server_status.json 的 active 当作唯一依据；优先看工具是否可拉取、可调用
-- 检查终端依赖（node/pnpm/python/uv）与 MCP 服务状态；其中 Node 类 `npx` MCP 实际依赖 `pnpm`，若缺少 `pnpm` 将无法启动；纯 node/sh 插件不依赖 `pnpm`
+- 检查终端依赖（node/pnpm/python/uv）与 MCP 服务状态；其中 Node 类 `npx` MCP 实际依赖 `pnpm`，若缺少 `pnpm` 将无法启动
 
 【Skill：安装与排查】
 1) 目录：/sdcard/Download/Operit/skills/
@@ -2486,7 +2486,7 @@ description: one-line summary of what this skill does
     const TOOLPKG_ID_PATTERN = /^\s*["']?toolpkg_id["']?\s*:\s*["']([^"']+)["']/m;
     const TOOLPKG_MAIN_PATTERN = /^\s*["']?main["']?\s*:\s*["']([^"']+)["']/m;
     const TOOLPKG_SUBPACKAGE_ID_PATTERN = /^\s*["']?id["']?\s*:\s*["']([^"']+)["']/gm;
-    const TOOLPKG_SKIP_DIR_NAMES = new Set([".git", "__pycache__", ".backup", "backup", ".operit"]);
+    const TOOLPKG_SKIP_DIR_NAMES = new Set([".git", "__pycache__"]);
     const TOOLPKG_SKIP_FILE_NAMES = new Set([".DS_Store", "Thumbs.db"]);
     function collect_related_package_load_errors(payload, packageName, ...relatedPaths) {
         const normalizedPackageName = normalize_package_key(packageName);
@@ -2833,57 +2833,17 @@ description: one-line summary of what this skill does
             temporaryPaths
         };
     }
-    async function copy_toolpkg_sources_filtered(sourceDir, targetDir, relativePath = "", stats = { copiedFiles: 0, skippedEntries: [] }) {
-        await ensure_android_directory(targetDir);
-        const listing = await Tools.Files.list(sourceDir, "android");
-        for (const entry of listing?.entries ?? []) {
-            const entryName = String(entry?.name ?? "").trim();
-            if (!entryName || entryName === "." || entryName === "..") {
-                continue;
-            }
-            const entryRelativePath = relativePath ? `${relativePath}/${entryName}` : entryName;
-            const sourceEntryPath = path_join(sourceDir, entryName);
-            if (entry?.isDirectory) {
-                if (TOOLPKG_SKIP_DIR_NAMES.has(entryName)) {
-                    stats.skippedEntries.push(`${entryRelativePath}/`);
-                    continue;
-                }
-                await copy_toolpkg_sources_filtered(sourceEntryPath, path_join(targetDir, entryName), entryRelativePath, stats);
-                continue;
-            }
-            if (TOOLPKG_SKIP_FILE_NAMES.has(entryName)) {
-                stats.skippedEntries.push(entryRelativePath);
-                continue;
-            }
-            await Tools.Files.copy(sourceEntryPath, path_join(targetDir, entryName), false, "android", "android");
-            stats.copiedFiles += 1;
-        }
-        return stats;
-    }
     async function build_toolpkg_archive_from_folder(source) {
         const tempBuildDir = path_join(OPERIT_CLEAN_ON_EXIT_DIR, `operit_editor_toolpkg_build_${safe_debug_file_stem(source.packageId, "toolpkg")}_${Date.now()}`);
         await ensure_android_directory(tempBuildDir);
         const archivePath = path_join(tempBuildDir, `${safe_debug_file_stem(source.packageId, "toolpkg")}.toolpkg`);
-        // 工作区绑定对话后会生成 .backup/（含聊天记录与快照），且在工作区文件树中不可见。
-        // 直接 zip 整个目录会把它打进 toolpkg，因此先按排除名单拷贝出一份干净的打包源。
-        const stageDir = path_join(tempBuildDir, "stage");
-        const stats = await copy_toolpkg_sources_filtered(source.folderPath, stageDir);
-        if (stats.copiedFiles === 0) {
-            throw new Error(`No packable files found in source folder: ${source.folderPath}`);
-        }
-        const stagedManifestExists = (await android_path_exists(path_join(stageDir, "manifest.json")))
-            || (await android_path_exists(path_join(stageDir, "manifest.hjson")));
-        if (!stagedManifestExists) {
-            throw new Error(`Root manifest is missing after filtering source folder: ${source.folderPath}`);
-        }
-        await Tools.Files.zip(stageDir, archivePath, "android", false);
+        await Tools.Files.zip(source.folderPath, archivePath, "android", false);
         if (!(await android_path_exists(archivePath))) {
             throw new Error(`Failed to create ToolPkg archive: ${archivePath}`);
         }
         return {
             archivePath,
-            temporaryPaths: [tempBuildDir],
-            skippedEntries: stats.skippedEntries
+            temporaryPaths: [tempBuildDir]
         };
     }
     function parse_requested_package_ids(raw) {
